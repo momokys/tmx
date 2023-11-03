@@ -37,6 +37,19 @@ where
     }
 }
 
+fn pair<'a, P1, P2, O1, O2>(p1: P1, p2: P2) -> impl Parser<&'a str, (O1, O2)>
+where
+    P1: Parser<&'a str, O1>,
+    P2: Parser<&'a str, O2>,
+{
+    move |input| match p1.parse(input) {
+        Ok((rest, result1)) => {
+            p2.parse(rest).map(|(rest, result2)| (rest, (result1, result2)))
+        },
+        _ => Err(input),
+    }
+}
+
 fn zero_or_more<'a, P, O>(parser: P) -> impl Parser<&'a str, Vec<O>>
 where
     P: Parser<&'a str, O>,
@@ -49,6 +62,16 @@ where
         }
         Ok((input, result))
     }
+}
+
+fn one_or_more<'a, P, O>(parser: P) -> impl Parser<&'a str, Vec<O>>
+    where
+        P: Parser<&'a str, O>,
+{
+    decide(
+        zero_or_more(parser),
+        |result| result.len() > 0,
+    )
 }
 
 fn match_literal<'a>(expected: &'static str) -> impl Parser<&'a str, ()> {
@@ -68,9 +91,27 @@ fn next_char(input: &str) -> ParserResult<&str, char> {
     }
 }
 
-// fn identifier(input: &str) -> ParserResult<&str, &str> {
-//
-// }
+fn identifier(input: &str) -> ParserResult<&str, String> {
+    pair(
+        decide(
+            next_char,
+            |next| next.is_alphabetic(),
+        ),
+        zero_or_more(
+            decide(
+                next_char,
+                |next| next.is_alphabetic() || next.is_ascii_digit()
+            )
+        )
+    ).parse(input).map(|(rest, (first, mut chars))| {
+        chars.insert(0, first);
+        let mut result = String::new();
+        for char in chars {
+            result.push(char);
+        }
+        (rest, result)
+    })
+}
 
 
 #[cfg(test)]
@@ -97,5 +138,10 @@ mod tests {
             )
         );
         assert_eq!(Ok((" hao", vec!['n', 'i'])), parser.parse("ni hao"), "decide pass testing");
+    }
+
+    #[test]
+    fn it_identifier() {
+        assert_eq!(Ok((" world!", String::from("Hello"))), identifier("Hello world!"))
     }
 }
