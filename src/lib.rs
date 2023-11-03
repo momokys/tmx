@@ -1,5 +1,3 @@
-use std::process::Output;
-
 type ParserResult<Input, Output> = Result<(Input, Output), Input>;
 
 pub trait Parser<Input, Output> {
