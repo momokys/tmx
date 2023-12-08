@@ -1,4 +1,4 @@
-use std::cmp::max;
+use std::ops::{BitAnd, BitOr, Shl, Shr};
 use crate::{Error, Result};
 use crate::range::{Bound, RangeArgument};
 
@@ -8,17 +8,37 @@ pub struct Parser<'a, I, O> {
 }
 
 impl <'a, I, O> Parser<'a, I, O> {
-    fn new<P>(parse: P) -> Self
+    pub fn new<P>(parse: P) -> Self
     where P: Fn(&'a [I], usize) -> Result<(O, usize)> + 'a
     {
         Self {
             parse: Box::new(parse)
         }
     }
-    fn parse(&self, input: &'a [I]) -> Result<(O, usize)> {
-        (self.parse)(input, 0)
+    pub fn comb<F>(f: F) -> Parser<'a, I, O>
+        where F: Fn() -> Parser<'a, I, O>
+    {
+        f()
     }
-    fn map<F, U>(self, map_fn: F) -> Parser<'a, I, U>
+    pub fn parse(&self, input: &'a [I]) -> Result<O> {
+        (self.parse)(input, 0).map(|(result, _)| result)
+    }
+    pub fn trace<F>(self, trace_fn: F) -> Parser<'a, I, O>
+    where
+    	O: 'a,
+    	F: Fn((&O, usize, usize)) -> () + 'a
+    {
+        Parser::new(move |input: &'a [I], start| {
+            match (self.parse)(input, start) {
+                Ok((output, end)) => {
+                    trace_fn((&output, start, end));
+                    Ok((output, end))
+                },
+                _ => Err(Error::Incomplete)
+            }
+        })
+    }
+    pub fn map<F, U>(self, map_fn: F) -> Parser<'a, I, U>
     where
         O: 'a,
         F: Fn(O) -> U + 'a,
@@ -27,14 +47,14 @@ impl <'a, I, O> Parser<'a, I, O> {
             (self.parse)(input, start).map(|(res, end)| ((map_fn(res), end)))
         })
     }
-    fn collect(self) -> Parser<'a, I, &'a [I]>
+    pub fn collect(self) -> Parser<'a, I, &'a [I]>
     where O: 'a,
     {
         Parser::new(move |input, start| {
             (self.parse)(input, start).map(|(_, end)| (&input[start..end], end))
         })
     }
-    fn convert<F, U, E>(self, convert_fn: F) -> Parser<'a, I, U>
+    pub fn convert<F, U, E>(self, convert_fn: F) -> Parser<'a, I, U>
     where
         O: 'a,
         F: Fn(O) -> std::result::Result<U, E> + 'a,
@@ -48,7 +68,7 @@ impl <'a, I, O> Parser<'a, I, O> {
             })
         })
     }
-    fn decide<F>(self, decide_fn: F) -> Parser<'a, I, O>
+    pub fn decide<F>(self, decide_fn: F) -> Parser<'a, I, O>
     where
         O: 'a,
         F: Fn(&O) -> bool + 'a,
@@ -60,7 +80,7 @@ impl <'a, I, O> Parser<'a, I, O> {
             }
         })
     }
-    fn repeat<R>(self, range: R) -> Parser<'a, I, Vec<O>>
+    pub fn repeat<R>(self, range: R) -> Parser<'a, I, Vec<O>>
     where
         R: RangeArgument<usize> + 'a,
         O: 'a,
@@ -69,7 +89,7 @@ impl <'a, I, O> Parser<'a, I, O> {
             let mut index = 0;
             let mut end = start;
             let mut result = Vec::<O>::new();
-            if let Bound::Included(0) = range.start() {
+            if let Bound::Included(0) = range.end() {
                 return Ok((result, end));
             }
             loop {
@@ -101,6 +121,16 @@ impl <'a, I, O> Parser<'a, I, O> {
                     }
                     _ => {}
                 }
+            }
+        })
+    }
+    pub fn opt(self) -> Parser<'a, I, Option<O>>
+    where O: 'a
+    {
+        Parser::new(move |input, start| {
+            match (self.parse)(input, start) {
+                Ok((res, end)) => Ok((Some(res), end)),
+                Err(_) => Ok((None, start)),
             }
         })
     }
@@ -147,6 +177,54 @@ where I: PartialEq
     })
 }
 
+impl <'a, I, O: 'a, U: 'a> BitAnd<Parser<'a, I, U>> for Parser<'a, I, O> {
+    type Output = Parser<'a, I, (O, U)>;
+
+    fn bitand(self, rhs: Parser<'a, I, U>) -> Self::Output {
+        Parser::new(move |input, start| {
+            (self.parse)(input, start).and_then(
+                |(o, end)| (rhs.parse)(input, end).map(|(u, end)| ((o,u), end))
+            )
+        })
+    }
+}
+impl <'a, I, O: 'a> BitOr for Parser<'a, I, O> {
+    type Output = Parser<'a, I, O>;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Parser::new(move |input, start| {
+            match (self.parse)(input, start) {
+                Ok((res, end)) => Ok((res, end)),
+                _ => (rhs.parse)(input, start),
+            }
+        })
+    }
+}
+
+impl <'a, I, O: 'a, U: 'a> Shl<Parser<'a, I, U>> for Parser<'a, I, O> {
+    type Output = Parser<'a, I, O>;
+
+    fn shl(self, rhs: Parser<'a, I, U>) -> Self::Output {
+        Parser::new(move |input, start| {
+            (self.parse)(input, start).and_then(
+                |(res, end)| (rhs.parse)(input, end).map(|(_, end)| (res, end))
+            )
+        })
+    }
+}
+
+impl <'a, I, O: 'a, U: 'a> Shr<Parser<'a, I, U>> for Parser<'a, I, O> {
+    type Output = Parser<'a, I, U>;
+
+    fn shr(self, rhs: Parser<'a, I, U>) -> Self::Output {
+        Parser::new(move |input, start| {
+            (self.parse)(input, start).and_then(
+                |(_, end)| (rhs.parse)(input, end).map(|(res, end)| (res, end))
+            )
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::parser::*;
@@ -155,42 +233,71 @@ mod tests {
     #[test]
     fn it_epsilon() {
         assert_eq!(
-            Ok(((), 0)),
+            Ok(()),
             epsilon().parse(b"Hello world!")
+        )
+    }
+    #[test]
+    fn it_next() {
+        assert_eq!(
+            Ok(b'H'),
+            next().parse(b"Hello world"),
         )
     }
     #[test]
     fn it_sym() {
         assert_eq!(
-            Ok((b'H', 1)),
-            sym(b'H').parse(b"Hello world!")
+            Ok(b'H'),
+            sym(b'H').trace(|(res, _, _)| println!("{}", *res)).parse(b"Hello world!")
         )
     }
     #[test]
     fn it_seq() {
         assert_eq!(
-            Ok(("Hello", b"Hello".len())),
+            Ok("Hello"),
             seq(b"Hello").convert(str::from_utf8).parse(b"Hello world!"),
         )
     }
     #[test]
     fn it_repeat() {
-        println!("{:?}, {:?}", "\\u".as_bytes(), "智一".as_bytes());
-        // match seq(b"\\u").parse() {
-        //     Ok(_) => {
-        //         println!("success");
-        //     }
-        //     Err(_) => {
-        //         println!("error");
-        //     }
-        // }
         assert_eq!(
-            Ok(("H", b"H".len())),
-            next()
-                .repeat(..1)
+            Ok("H"),
+            next::<u8>()
+                .decide(|&res| res.is_ascii_alphabetic())
+                .repeat(0..)
                 .collect()
                 .convert(str::from_utf8)
-                .parse(b"Hello world!"),
+                .parse(b"He"),
+        )
+    }
+
+    #[test]
+    fn it_ops_bit_and() {
+        assert_eq!(
+            Ok((b'H', b'e')),
+            (sym(b'H') & sym(b'e')).parse(b"Hello world"),
+        )
+    }
+
+    #[test]
+    fn it_ops_bit_or() {
+        assert_eq!(
+            Ok(b'H'),
+            (sym(b'H') | sym(b'h')).parse(b"Hello world"),
+        )
+    }
+    #[test]
+    fn it_ops_shl() {
+        assert_eq!(
+            Ok(b'H'),
+            (sym(b'H') << sym(b'e')).parse(b"Hello world"),
+        )
+    }
+    #[test]
+    fn it_ops_shr() {
+        assert_eq!(
+            Ok(b'e'),
+            (sym(b'H') >> sym(b'e')).parse(b"Hello world"),
         )
     }
 }
